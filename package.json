@@ -1,0 +1,38 @@
+{
+  "name": "zonemta-email-verifier",
+  "version": "1.0.0",
+  "description": "ZoneMTA plugin for real-time email verification. Validates recipients via SMTP check before delivery — blocks bounces, disposable emails, and undeliverable addresses. Powered by MSG25 Email Verification API.",
+  "main": "email-verifier.js",
+  "keywords": [
+    "zonemta",
+    "zone-mta",
+    "email-verification",
+    "email-validator",
+    "smtp-verification",
+    "bounce-protection",
+    "disposable-email",
+    "email-deliverability",
+    "mta-plugin",
+    "email-checker",
+    "bulk-email-verification",
+    "msg25",
+    "anti-bounce",
+    "catch-all-detection",
+    "role-based-email",
+    "email-hygiene",
+    "email-validation-api",
+    "bounce-prevention",
+    "sender-reputation",
+    "email-list-cleaning"
+  ],
+  "author": "MSG25 <support@msg25.com> (https://msg25.com)",
+  "license": "MIT",
+  "homepage": "https://msg25.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/msg25/zonemta-email-verifier"
+  },
+  "bugs": {
+    "url": "https://github.com/msg25/zonemta-email-verifier/issues"
+  }
+}
