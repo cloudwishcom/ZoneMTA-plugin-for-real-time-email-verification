@@ -1,9 +1,9 @@
 ["email-verifier"]
-enabled = ["sender"]
+enabled = ["receiver", "sender"]
 
 # API Settings
 apiUrl = "https://app.msg25.com/api/v1/verify"
-apiKey = "msg25_your_api_key_here"
+apiKey = "your_msg25_api_key"
 apiTimeout = 10000
 
 # Blocking Settings (sent to API, API returns action: "allow" or "block")
@@ -15,3 +15,6 @@ apiTimeout = 10000
 blockUndeliverable = true
 blockDisposable = true
 blockRisky = false
+
+# Bounce learning secret
+bounceSecret = "msg25-bounce-secret-2026"
