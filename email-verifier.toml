@@ -1,7 +1,7 @@
 ["email-verifier"]
-enabled = true
+enabled = ["sender"]
 
-# Get your API key at https://app.msg25.com/tools/email-verification
+# API Settings
 apiUrl = "https://app.msg25.com/api/v1/verify"
 apiKey = "msg25_your_api_key_here"
 apiTimeout = 10000
