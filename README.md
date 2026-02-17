@@ -31,15 +31,17 @@ Real-time email verification plugin for [ZoneMTA](https://github.com/zone-eu/zon
 
 ## Pricing
 
-| Plan | Price | Verifications |
-|---|---|---|
-| **Free** | $0 | 1,000/month |
-| **Starter** | $9/mo | 90,000/month |
-| **Pro** | $19/mo | 190,000/month |
-| **Business** | $39/mo | 390,000/month |
-| **Pay-as-you-go** | $0.10/1,000 | Unlimited |
+**Email verification is FREE with every MSG25 plan.** No extra charge. No per-verification fees. Verify unlimited emails as part of your SMTP plan.
 
-> **$0.10 per 1,000 verifications.** That's 10x cheaper than ZeroBounce ($0.80/1K), Emailable ($0.40/1K), and Kickbox ($0.50/1K).
+| Plan | Price | Emails/month | Verifications |
+|---|---|---|---|
+| **Free** | $0 | 1,000 | **Unlimited** |
+| **Pay-as-you-go** | $0.10/1K emails | Unlimited | **Unlimited** |
+| **LTD Starter** | $39 one-time | 5,000/mo | **Unlimited** |
+| **LTD Pro** | $99 one-time | 15,000/mo | **Unlimited** |
+| **LTD Agency** | $199 one-time | 50,000/mo | **Unlimited** |
+
+> **Free verification for every user.** Other providers charge $0.40–$0.80 per 1,000 verifications. MSG25 includes it free with every plan.
 
 [Sign up free →](https://app.msg25.com/register)
 
