@@ -16,5 +16,3 @@ blockUndeliverable = true
 blockDisposable = true
 blockRisky = false
 
-# Bounce learning secret
-bounceSecret = "msg25-bounce-secret-2026"
