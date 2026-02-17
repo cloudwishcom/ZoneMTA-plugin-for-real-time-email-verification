@@ -1,4 +1,4 @@
-# zonemta-email-verifier
+# FREE zonemta-email-verifier
 
 Real-time email verification plugin for [ZoneMTA](https://github.com/zone-eu/zone-mta). Validates every recipient **before delivery** via the [MSG25 Email Verification API](https://msg25.com) — blocks bounces, disposable emails, and undeliverable addresses automatically.
 
