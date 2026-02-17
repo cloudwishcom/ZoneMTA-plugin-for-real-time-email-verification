@@ -1,252 +1,206 @@
 'use strict';
 
 /**
- * ZoneMTA Email Verification Plugin — Pure API
+ * ZoneMTA Email Verification Plugin — MSG25
  *
- * Calls MSG25 Email Verification API for every recipient.
- * Sends settings (block_undeliverable, block_disposable, block_risky) to API.
- * API returns action: "allow" or "block" — plugin just obeys the response.
+ * Verifies recipient email addresses at RCPT TO stage via MSG25 Email Verification API.
+ * Bad recipients (undeliverable, disposable) are rejected with 550 BEFORE the email
+ * body is transferred — saving bandwidth and protecting sender reputation.
  *
- * Config (email-verifier.toml):
- *   apiUrl, apiKey, apiTimeout, blockUndeliverable, blockDisposable, blockRisky
+ * Flow:
+ *   RCPT TO → in-memory cache check → API call → reject (550) or allow
+ *
+ * Features:
+ *   - Rejects at RCPT TO stage (before DATA) — same pattern as blacklist rejection
+ *   - In-memory cache with per-result TTL (avoids redundant API calls)
+ *   - Fail-open on API timeout (email goes through if API is down)
+ *   - Configurable blocking: undeliverable, disposable, risky
+ *   - Remotelog integration for timeline visibility
+ *   - Only checks authenticated sessions (outbound mail)
+ *
+ * Config (config/plugins/email-verifier.toml):
+ *
+ *   ["email-verifier"]
+ *   enabled = ["receiver"]
+ *   apiUrl = "https://app.msg25.com/api/v1/verify"
+ *   apiKey = "your-api-key"
+ *   apiTimeout = 10000
+ *   blockUndeliverable = true
+ *   blockDisposable = true
+ *   blockRisky = false
+ *
+ * API Response (action field determines reject/allow):
+ *   action: "block"  → 550 rejection at RCPT TO
+ *   action: "allow"  → recipient accepted
+ *
+ * @see https://msg25.com/verify
  */
 
 const https = require('https');
 const http = require('http');
-const crypto = require('crypto');
 
 module.exports.title = 'Email Verifier';
-module.exports.description = 'Verifies recipients via MSG25 API before delivery';
+module.exports.description = 'Verifies recipients at RCPT TO via MSG25 API';
 
-let appRef;
-let config = {
-    apiUrl: 'https://app.msg25.com/api/v1/verify',
-    apiKey: '',
-    apiTimeout: 10000,
-    blockUndeliverable: true,
-    blockDisposable: true,
-    blockRisky: false,
+// In-memory cache: email → { action, result, reason, score, ts, ... }
+var cache = new Map();
+var CACHE_TTL = {
+    deliverable: 30 * 60 * 1000,        // 30 min
+    undeliverable: 24 * 60 * 60 * 1000, // 24 hours
+    risky: 15 * 60 * 1000,              // 15 min
+    unknown: 5 * 60 * 1000,             // 5 min
 };
 
-// In-memory cache: email → { data, ts }
-const cache = new Map();
-const CACHE_TTL = {
-    deliverable: 30 * 60 * 1000,
-    undeliverable: 60 * 60 * 1000,
-    risky: 15 * 60 * 1000,
-    unknown: 5 * 60 * 1000,
-};
+function apiGet(url, timeout) {
+    return new Promise(function(resolve) {
+        var client = url.startsWith('https') ? https : http;
+        var timer = setTimeout(function() { req.destroy(); resolve(null); }, timeout);
+        var req = client.get(url, { timeout: timeout }, function(res) {
+            var body = '';
+            res.on('data', function(chunk) { body += chunk; });
+            res.on('end', function() {
+                clearTimeout(timer);
+                try { resolve(JSON.parse(body)); } catch(e) { resolve(null); }
+            });
+        });
+        req.on('error', function() { clearTimeout(timer); resolve(null); });
+    });
+}
 
-// ── INIT ──
-
-module.exports.init = async (app, done) => {
-    appRef = app;
-    config.apiKey = app.config.apiKey || '';
-    config.apiUrl = app.config.apiUrl || config.apiUrl;
-    config.apiTimeout = parseInt(app.config.apiTimeout) || config.apiTimeout;
-    config.blockUndeliverable = app.config.blockUndeliverable !== false && app.config.blockUndeliverable !== 'false';
-    config.blockDisposable = app.config.blockDisposable !== false && app.config.blockDisposable !== 'false';
-    config.blockRisky = app.config.blockRisky === true || app.config.blockRisky === 'true';
+module.exports.init = function(app, done) {
+    var config = {
+        apiUrl: app.config.apiUrl || 'https://app.msg25.com/api/v1/verify',
+        apiKey: app.config.apiKey || '',
+        apiTimeout: parseInt(app.config.apiTimeout) || 10000,
+        blockUndeliverable: app.config.blockUndeliverable !== false && app.config.blockUndeliverable !== 'false',
+        blockDisposable: app.config.blockDisposable !== false && app.config.blockDisposable !== 'false',
+        blockRisky: app.config.blockRisky === true || app.config.blockRisky === 'true',
+    };
 
     if (!config.apiKey) {
-        app.logger.error('Email Verifier', 'No apiKey configured! Plugin disabled.');
+        app.logger.error('Email Verifier', 'No apiKey! Plugin disabled.');
         return done();
     }
 
     app.logger.info('Email Verifier',
-        'Active — API: %s, Block: undeliverable=%s disposable=%s risky=%s',
+        'RCPT TO rejection via API: %s | block: undeliverable=%s disposable=%s risky=%s',
         config.apiUrl,
         config.blockUndeliverable ? 'YES' : 'NO',
         config.blockDisposable ? 'YES' : 'NO',
         config.blockRisky ? 'YES' : 'NO'
     );
 
-    // Purge expired cache every 2 min
-    setInterval(() => {
-        const now = Date.now();
-        for (const [key, entry] of cache) {
-            const ttl = CACHE_TTL[entry.data?.result] || CACHE_TTL.unknown;
-            if (now - entry.ts > ttl) cache.delete(key);
+    // Purge expired cache every 5 min
+    setInterval(function() {
+        var now = Date.now();
+        for (var entry of cache) {
+            var ttl = CACHE_TTL[entry[1].result] || CACHE_TTL.unknown;
+            if (now - entry[1].ts > ttl) cache.delete(entry[0]);
         }
-    }, 120000);
+    }, 300000);
 
-    done();
-};
+    // ── Verify: memory cache → API ──
+    async function verify(email) {
+        var key = email.toLowerCase().trim();
 
-// ── API CALL (sends settings to API) ──
+        var cached = cache.get(key);
+        if (cached) {
+            var ttl = CACHE_TTL[cached.result] || CACHE_TTL.unknown;
+            if ((Date.now() - cached.ts) < ttl) {
+                return Object.assign({}, cached, { _source: 'cache' });
+            }
+            cache.delete(key);
+        }
 
-function callApi(email) {
-    return new Promise((resolve) => {
-        if (!config.apiKey) return resolve(null);
-
-        const params = new URLSearchParams({
-            email,
+        var params = new URLSearchParams({
+            email: key,
             api_key: config.apiKey,
             block_undeliverable: config.blockUndeliverable ? 'true' : 'false',
             block_disposable: config.blockDisposable ? 'true' : 'false',
             block_risky: config.blockRisky ? 'true' : 'false',
         });
 
-        const url = `${config.apiUrl}?${params.toString()}`;
-        const client = url.startsWith('https') ? https : http;
+        var data = await apiGet(config.apiUrl + '?' + params.toString(), config.apiTimeout);
+        if (!data || data.error) return null;
 
-        const timeout = setTimeout(() => {
-            req.destroy();
-            resolve(null);
-        }, config.apiTimeout);
-
-        const req = client.get(url, { timeout: config.apiTimeout }, (res) => {
-            let body = '';
-            res.on('data', chunk => body += chunk);
-            res.on('end', () => {
-                clearTimeout(timeout);
-                try {
-                    const data = JSON.parse(body);
-                    if (data.error) return resolve(null);
-                    resolve(data);
-                } catch (err) {
-                    resolve(null);
-                }
-            });
-        });
-
-        req.on('error', () => {
-            clearTimeout(timeout);
-            resolve(null);
-        });
-    });
-}
-
-// ── VERIFY (cache → API) ──
-
-async function verify(email) {
-    const key = email.toLowerCase().trim();
-
-    // Check cache
-    const cached = cache.get(key);
-    if (cached) {
-        const ttl = CACHE_TTL[cached.data?.result] || CACHE_TTL.unknown;
-        if ((Date.now() - cached.ts) < ttl) {
-            return { ...cached.data, _source: 'cache' };
-        }
-        cache.delete(key);
+        var entry = {
+            result: data.result || 'unknown',
+            action: data.action || 'allow',
+            reason: data.action_reason || data.reason || '',
+            score: data.score || 0,
+            disposable: data.disposable || false,
+            free: data.free || false,
+            catch_all: data.catch_all || false,
+            role: data.role_based || data.role || false,
+            smtp_code: data.smtp_code || null,
+            reachable: data.reachable || 'unknown',
+            duration_ms: data.duration_ms || 0,
+            ts: Date.now()
+        };
+        cache.set(key, entry);
+        return Object.assign({}, entry, { _source: 'api' });
     }
 
-    // Call API
-    const data = await callApi(key);
-    if (data) {
-        cache.set(key, { data, ts: Date.now() });
-        return { ...data, _source: 'api' };
-    }
+    // ── HOOK: smtp:rcpt_to — verify via API, reject or allow ──
+    app.addHook('smtp:rcpt_to', async function(address, session) {
+        if (!session.user) return;
 
-    return null; // fail-open
-}
+        var email = address.address;
+        if (!email) return;
 
-// ── HOOK ──
+        var user = session.user;
 
-module.exports['smtp:data_ready'] = async (envelope, callback) => {
-    if (!config.apiKey) return callback();
-
-    const smtpUser = envelope.user;
-    if (!smtpUser) return callback();
-
-    try {
-        const recipients = envelope.to || [];
-        if (recipients.length === 0) return callback();
-
-        const blocked = [];
-        const headerParts = [];
-
-        for (const recipient of recipients) {
-            const email = typeof recipient === 'string' ? recipient : recipient.address || recipient;
-            const result = await verify(email);
+        try {
+            var result = await verify(email);
 
             if (!result) {
-                // API failed/timeout — fail-open
-                headerParts.push(`${email}=unknown`);
-                remotelog(envelope, email, smtpUser, 'VERIFY_UNKNOWN', {
-                    result: 'unknown', reason: 'API unavailable', duration_ms: 0, source: 'timeout',
-                });
-                continue;
+                app.logger.info('Email Verifier', 'RCPT %s SKIP (API timeout) user=%s', email, user);
+                try { app.remotelog('VRF' + Date.now().toString(36), false, 'VERIFY_UNKNOWN', {
+                    to: email, user: user, reason: 'API unavailable',
+                }); } catch(e) {}
+                return;
             }
 
-            const status = result.result || 'unknown';
-            const reason = result.reason || '';
-            const ms = result.duration_ms || 0;
-            const src = result._source || 'api';
-            const action = result.action || 'allow';  // API decides!
-            const actionReason = result.action_reason || reason;
+            var action = result.action;
+            var status = result.result;
+            var reason = result.reason;
+            var src = result._source;
+            var score = result.score;
+            var ms = result.duration_ms;
 
             if (action === 'block') {
-                blocked.push({ email, reason: actionReason || status });
-                headerParts.push(`${email}=blocked`);
-                remotelog(envelope, email, smtpUser, 'VERIFY_BLOCKED', {
-                    result: status, reason: actionReason, duration_ms: ms, source: src,
-                    disposable: result.disposable || false,
-                    smtp_code: result.smtp_check?.smtp_code || null,
-                });
-            } else {
-                headerParts.push(`${email}=${status}`);
-                remotelog(envelope, email, smtpUser, 'VERIFY_' + status.toUpperCase(), {
-                    result: status, reason, duration_ms: ms, source: src,
-                    disposable: result.disposable || false,
-                    role_based: result.role_based || result.role || false,
-                    catch_all: result.catch_all || false,
-                });
+                app.logger.info('Email Verifier', 'RCPT_REJECT %s result=%s reason=%s score=%d src=%s user=%s %dms',
+                    email, status, reason, score, src, user, ms);
+
+                try { app.remotelog('VRF' + Date.now().toString(36), false, 'VERIFY_BLOCKED', {
+                    to: email, user: user, result: status, reason: reason,
+                    score: score, source: src, duration_ms: ms,
+                    disposable: result.disposable, smtp_code: result.smtp_code,
+                    reachable: result.reachable, free: result.free,
+                }); } catch(e) {}
+
+                var err = new Error('550 5.1.1 Rejected: ' + (reason || status));
+                err.name = 'SMTPReject';
+                err.responseCode = 550;
+                throw err;
             }
+
+            app.logger.info('Email Verifier', 'RCPT_ALLOW %s result=%s score=%d src=%s user=%s %dms',
+                email, status, score, src, user, ms);
+
+            try { app.remotelog('VRF' + Date.now().toString(36), false, 'VERIFY_' + status.toUpperCase(), {
+                to: email, user: user, result: status, reason: reason,
+                score: score, source: src, duration_ms: ms,
+                disposable: result.disposable, role: result.role,
+                catch_all: result.catch_all, smtp_code: result.smtp_code,
+                reachable: result.reachable, free: result.free,
+            }); } catch(e) {}
+
+        } catch (err) {
+            if (err.name === 'SMTPReject') throw err;
+            app.logger.error('Email Verifier', 'RCPT error %s: %s', email, err.message);
         }
+    });
 
-        // Add verification header
-        if (envelope.headers && headerParts.length > 0) {
-            try {
-                envelope.headers.add('X-MSG25-Verification', headerParts.join('; '), 0);
-            } catch (e) {}
-        }
-
-        // ALL recipients blocked → reject
-        if (blocked.length > 0 && blocked.length === recipients.length) {
-            const reasons = blocked.map(b => `${b.email}: ${b.reason}`).join(', ');
-            return callback(null, {
-                code: 550,
-                message: `All recipients undeliverable: ${reasons}`,
-            });
-        }
-
-        // SOME blocked → remove from envelope
-        if (blocked.length > 0) {
-            const blockedSet = new Set(blocked.map(b => b.email.toLowerCase()));
-            envelope.to = recipients.filter(r => {
-                const addr = typeof r === 'string' ? r : r.address || r;
-                return !blockedSet.has(addr.toLowerCase());
-            });
-        }
-
-        return callback();
-
-    } catch (err) {
-        // Fail-open on any error
-        return callback();
-    }
+    done();
 };
-
-// ── REMOTELOG HELPER ──
-
-function remotelog(envelope, email, smtpUser, action, data) {
-    if (!appRef || !appRef.remotelog) return;
-    try {
-        const id = envelope.id || ('VRF' + crypto.randomBytes(8).toString('hex'));
-        appRef.remotelog(id, false, action, {
-            from: envelope.from || '',
-            to: email,
-            user: smtpUser,
-            result: data.result || '',
-            reason: data.reason || '',
-            duration_ms: data.duration_ms || 0,
-            source: data.source || '',
-            disposable: data.disposable || false,
-            role_based: data.role_based || false,
-            catch_all: data.catch_all || false,
-            smtp_code: data.smtp_code || null,
-        });
-    } catch (e) {}
-}
