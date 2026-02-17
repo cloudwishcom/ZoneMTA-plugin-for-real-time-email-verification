@@ -1,0 +1,17 @@
+["email-verifier"]
+enabled = true
+
+# Get your API key at https://app.msg25.com/tools/email-verification
+apiUrl = "https://app.msg25.com/api/v1/verify"
+apiKey = "msg25_your_api_key_here"
+apiTimeout = 10000
+
+# Blocking Settings (sent to API, API returns action: "allow" or "block")
+# ─────────────────────────────────────────────────
+# blockUndeliverable: Block undeliverable (no mailbox, no MX, blacklisted, hard-bounced)
+# blockDisposable:    Block disposable/throwaway domains
+# blockRisky:         Block risky (catch-all, full mailbox, temporary issues)
+# ─────────────────────────────────────────────────
+blockUndeliverable = true
+blockDisposable = true
+blockRisky = false
